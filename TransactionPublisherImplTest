@@ -1,0 +1,146 @@
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
+import org.mockito.Mockito._
+import org.mockito.ArgumentMatchers._
+import org.scalatest.BeforeAndAfterEach
+
+class TransactionPublisherImplTest extends AnyFlatSpec with Matchers with BeforeAndAfterEach {
+  
+  private val mockAmpsClient = mock(classOf[JsonAmpsClient])
+  private val testFailsAmpsTopic = "test.fails.topic"
+  private val testTimezone = "UTC"
+  private val testFormat = mock(classOf[Formats])
+  private val defaultFormats = mock(classOf[DefaultFormats])
+  private val expectedDate = "2025-04-22" // using previous business day
+  
+  var publisher: TransactionPublisherImpl = _
+  
+  override def beforeEach(): Unit = {
+    reset(mockAmpsClient)
+    publisher = new TransactionPublisherImpl(mockAmpsClient, testFailsAmpsTopic, testTimezone)
+  }
+  
+  "TransactionPublisherImpl" should "publish a list of transactions" in {
+    // Arrange
+    val transaction1 = mock(classOf[Transaction])
+    val transaction2 = mock(classOf[Transaction])
+    val publishedTransaction1 = PublishedTransaction(transaction1, expectedDate)
+    val publishedTransaction2 = PublishedTransaction(transaction2, expectedDate)
+    val transactions = List(transaction1, transaction2)
+    
+    when(mockAmpsClient.publish(eq(testFailsAmpsTopic), any[String]())).thenReturn(Success(()))
+    
+    // Act
+    publisher.publish(transactions)
+    
+    // Assert
+    verify(mockAmpsClient, times(2)).publish(eq(testFailsAmpsTopic), any[String]())
+  }
+  
+  it should "publish a single transaction" in {
+    // Arrange
+    val transaction = mock(classOf[PublishedTransaction])
+    when(transaction.copy(any[String]())).thenReturn(transaction)
+    when(mockAmpsClient.publish(eq(testFailsAmpsTopic), any[String]())).thenReturn(Success(()))
+    
+    // Act
+    publisher.publish(transaction)
+    
+    // Assert
+    verify(mockAmpsClient).publish(eq(testFailsAmpsTopic), any[String]())
+  }
+  
+  it should "retry publishing when there's a failure" in {
+    // Arrange
+    val transaction = mock(classOf[PublishedTransaction])
+    val transactions = List(transaction)
+    val retry = Retry(3, 10) // 3 attempts, 10ms delay
+    
+    when(mockAmpsClient.publish(eq(testFailsAmpsTopic), any[String]()))
+      .thenReturn(Failure(new RuntimeException("Test exception")))
+      .thenReturn(Success(()))
+    
+    // Act
+    publisher.publish(transactions, 0, retry)
+    
+    // Assert
+    verify(mockAmpsClient, times(2)).publish(eq(testFailsAmpsTopic), any[String]())
+  }
+  
+  it should "not retry if isLastTry is true" in {
+    // Arrange
+    val transaction = mock(classOf[PublishedTransaction])
+    val transactions = List(transaction)
+    val retry = mock(classOf[Retry])
+    when(retry.isLastTry).thenReturn(true)
+    when(retry.overMaxNumber).thenReturn(false)
+    when(retry.delayInMs).thenReturn(0)
+    
+    when(mockAmpsClient.publish(eq(testFailsAmpsTopic), any[String]()))
+      .thenReturn(Failure(new RuntimeException("Test exception")))
+    
+    // Act
+    publisher.publish(transactions, 0, retry)
+    
+    // Assert
+    verify(mockAmpsClient, times(1)).publish(eq(testFailsAmpsTopic), any[String]())
+    verify(retry, never()).nextTry()
+  }
+}
+
+class NoOpTransactionPublisherTest extends AnyFlatSpec with Matchers {
+  
+  "NoOpTransactionPublisher" should "do nothing when publishing a list of transactions" in {
+    // Arrange
+    val publisher = new NoOpTransactionPublisher()
+    val transaction = mock(classOf[Transaction])
+    
+    // Act & Assert (no exception should be thrown)
+    noException should be thrownBy publisher.publish(List(transaction))
+  }
+  
+  it should "do nothing when publishing a single transaction" in {
+    // Arrange
+    val publisher = new NoOpTransactionPublisher()
+    val transaction = mock(classOf[PublishedTransaction])
+    
+    // Act & Assert (no exception should be thrown)
+    noException should be thrownBy publisher.publish(transaction)
+  }
+}
+
+class TransactionPublisherObjectTest extends AnyFlatSpec with Matchers {
+  
+  "TransactionPublisher object" should "create TransactionPublisherImpl when publishToAmps is true" in {
+    // Arrange
+    val mockAmpsClient = mock(classOf[JsonAmpsClient])
+    val mockConfig = mock(classOf[CdrOdsReconConfig])
+    val mockApiConfig = mock(classOf[CdrOdsApiConfig])
+    
+    when(mockConfig.publishToAmps).thenReturn(true)
+    when(mockConfig.failsAmpsTopic).thenReturn("test.topic")
+    when(mockConfig.cdrFailsAmpsTopic).thenReturn("test.cdr.topic")
+    when(mockConfig.cdrOdsApiConfig).thenReturn(mockApiConfig)
+    when(mockApiConfig.timezone).thenReturn("UTC")
+    
+    // Act
+    val publisher = TransactionPublisher.apply(mockAmpsClient, mockConfig)
+    
+    // Assert
+    publisher shouldBe a [TransactionPublisherImpl]
+  }
+  
+  it should "create NoOpTransactionPublisher when publishToAmps is false" in {
+    // Arrange
+    val mockAmpsClient = mock(classOf[JsonAmpsClient])
+    val mockConfig = mock(classOf[CdrOdsReconConfig])
+    
+    when(mockConfig.publishToAmps).thenReturn(false)
+    
+    // Act
+    val publisher = TransactionPublisher.apply(mockAmpsClient, mockConfig)
+    
+    // Assert
+    publisher shouldBe a [NoOpTransactionPublisher]
+  }
+}
